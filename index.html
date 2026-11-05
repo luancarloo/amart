@@ -668,7 +668,7 @@ body{
     </div>
     <!-- VERSÃO DO SISTEMA: sobe a cada publicação (2.0.1, 2.0.2, ...).
          É a mesma versão do nome do cache no sw.js — os dois andam juntos. -->
-    <div class="login-footer">4SIDES · STEELPORT v2.1.21 · Amart Shipping</div>
+    <div class="login-footer">4SIDES · STEELPORT v2.1.22 · Amart Shipping</div>
   </div>
 </div>
 
@@ -1319,6 +1319,7 @@ body{
         </select>
         <button class="btn btn-secondary btn-sm" onclick="limparFiltrosDB()">✕ LIMPAR</button>
         <button class="btn btn-secondary btn-sm" onclick="exportCoilsCSV()">↓ CSV</button>
+        <button class="btn btn-secondary btn-sm" onclick="downloadTemplateCoils()" title="Planilha com as colunas certas para preencher e importar">↓ MODELO EXCEL</button>
         <button class="btn btn-info btn-sm" onclick="openImportModal()">↑ IMPORTAR EXCEL</button>
         <button class="btn btn-secondary btn-sm" onclick="abrirTransferirBL()"
           title="Copiar as bobinas de um BL para outro armazém, com uma letra na frente">⇄ TRANSFERIR BL</button>
@@ -1643,6 +1644,7 @@ body{
       <div style="font-size:12px;color:var(--muted);font-family:'JetBrains Mono',monospace;">📌 Colunas: <span style="color:var(--accent)">Numero Bobina · Armazem · BL · Cliente · Navio · Viagem · Produto · Peso Bruto · Peso Liquido</span></div>
       <div style="display:flex;justify-content:space-between;gap:1rem;">
         <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-import')">CANCELAR</button>
+        <button class="btn btn-secondary btn-sm" onclick="downloadTemplateCoils()" title="Planilha com as colunas certas para preencher e importar">↓ BAIXAR MODELO</button>
         <button class="btn btn-primary" id="btn-confirm-import" style="display:none;" onclick="confirmImport()">✓ IMPORTAR BOBINAS</button>
       </div>
     </div>
@@ -8290,6 +8292,72 @@ function _dl(fn,csv){ const a=document.createElement('a'); a.href=URL.createObje
 // ══════════════════════════════════════════
 // IMPORT
 // ══════════════════════════════════════════
+// ── Modelo Excel do Banco de Dados (bobinas) ─────────────────────────
+// Mesmas colunas, na mesma ordem, que o handleXLSFile lê (A..I).
+// A coluna do número da bobina vai formatada como TEXTO: sem isso o Excel
+// transforma "0123456" em 123456 e a bobina entra com o número errado.
+async function downloadTemplateCoils(){
+  try{
+    const wb=new ExcelJS.Workbook();
+    const ws=wb.addWorksheet('Bobinas');
+    const head=['Numero Bobina','Armazem','BL','Cliente','Navio','Viagem','Produto','Peso Bruto (kg)','Peso Liquido (kg)'];
+    ws.columns=[{width:20},{width:14},{width:20},{width:22},{width:22},{width:10},{width:18},{width:16},{width:16}];
+    ws.addRow(head);
+    const h=ws.getRow(1);
+    h.font={bold:true,color:{argb:'FFFFFFFF'}};
+    h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF0A0C0F'}};
+    h.alignment={vertical:'middle',horizontal:'center'};
+    h.height=20;
+    for(let r=2;r<=3000;r++){
+      ws.getCell(r,1).numFmt='@';                 // número da bobina = texto (guarda zero à esquerda)
+      ws.getCell(r,3).numFmt='@';                 // BL também
+      ws.getCell(r,8).numFmt='0';
+      ws.getCell(r,9).numFmt='0';
+    }
+    ws.views=[{state:'frozen',ySplit:1}];
+
+    const ins=wb.addWorksheet('Instruções');
+    ins.columns=[{width:22},{width:14},{width:58}];
+    const linhas=[
+      ['INSTRUÇÕES DE PREENCHIMENTO'],[],
+      ['Coluna','Obrigatório','Como preencher'],
+      ['Numero Bobina','✓ SIM','Exatamente como na etiqueta, com zeros à esquerda (a coluna já está em formato texto)'],
+      ['Armazem','Recomendado','Nome do armazém, ex.: ARM-01'],
+      ['BL','Recomendado','Número do BL'],
+      ['Cliente','Não','Nome do cliente'],
+      ['Navio','Recomendado','Nome do navio'],
+      ['Viagem','Não','Número da viagem'],
+      ['Produto','Não','Ex.: BOBINA LAMINADA A FRIO'],
+      ['Peso Bruto (kg)','Não','Em quilos, só números. Ex.: 8100'],
+      ['Peso Liquido (kg)','Não','Em quilos, só números. Ex.: 8050'],
+      [],
+      ['DICAS:'],
+      ['- Preencha a aba "Bobinas" a partir da linha 2 (a linha 1 é o cabeçalho). Não mude a ordem das colunas.'],
+      ['- Bobina + Navio + BL iguais a uma já cadastrada = atualização; senão entra como bobina nova.'],
+      ['- Ao colar de outra planilha, use "Colar valores" para não perder o formato texto da 1ª coluna.'],
+      [],
+      ['EXEMPLOS DE PREENCHIMENTO (não importar):'],
+      head,
+      ['0123456789','ARM-01','MEDU1234567','CLIENTE EXEMPLO','NAVIO EXEMPLO','001','BOBINA LAQ',8100,8050],
+      ['A98765B','ARM-02','MEDU1234567','CLIENTE EXEMPLO','NAVIO EXEMPLO','001','BOBINA ZINCADA',12500,12420],
+    ];
+    linhas.forEach(l=>ins.addRow(l));
+    ins.getRow(1).font={bold:true,size:13};
+    ins.getRow(3).font={bold:true};
+    ins.getRow(19).font={bold:true};
+    ins.getRow(20).font={bold:true};
+    ins.getCell('A21').numFmt='@'; ins.getCell('A21').value='0123456789';
+
+    const buf=await wb.xlsx.writeBuffer();
+    const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='4SIDES_Bobinas_Modelo.xlsx';
+    document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    showToast('✓ Modelo Excel baixado!','#22c55e','#000');
+  }catch(e){
+    showToast('⚠ Não foi possível gerar o modelo: '+e.message,'#e05c1a','#fff');
+  }
+}
+
 function openImportModal(){ resetImport(); document.getElementById('modal-import').classList.add('open'); }
 function dzOver(e){ e.preventDefault(); const dz=document.getElementById('drop-zone'); dz.style.borderColor='var(--accent)'; dz.style.background='rgba(240,165,0,.05)'; }
 function dzLeave(){ const dz=document.getElementById('drop-zone'); dz.style.borderColor='var(--border)'; dz.style.background=''; }
