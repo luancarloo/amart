@@ -668,7 +668,7 @@ body{
     </div>
     <!-- VERSÃO DO SISTEMA: sobe a cada publicação (2.0.1, 2.0.2, ...).
          É a mesma versão do nome do cache no sw.js — os dois andam juntos. -->
-    <div class="login-footer">4SIDES · STEELPORT v2.1.20 · Amart Shipping</div>
+    <div class="login-footer">4SIDES · STEELPORT v2.1.21 · Amart Shipping</div>
   </div>
 </div>
 
@@ -1527,7 +1527,7 @@ body{
         <div class="form-group">
           <label>Senha *</label>
           <div style="position:relative;">
-            <input type="password" id="uf-pass" placeholder="Mínimo 4 caracteres" autocomplete="new-password" style="width:100%;padding-right:2.8rem;">
+            <input type="password" id="uf-pass" placeholder="Mínimo 6 caracteres" autocomplete="new-password" style="width:100%;padding-right:2.8rem;">
             <button type="button" onclick="togglePassVis('uf-pass','eye-user')" style="position:absolute;right:.6rem;top:50%;transform:translateY(-50%);background:transparent;border:none;cursor:pointer;color:var(--muted);font-size:18px;line-height:1;padding:.2rem;">
               <span id="eye-user">👁</span>
             </button>
@@ -1804,7 +1804,8 @@ async function verifyPass(inputPlain, storedUser){
 }
 
 function loadUsers(){
-  try{ const d=localStorage.getItem('sp_users'); return d?JSON.parse(d):[DEFAULT_ADMIN]; }catch(e){ return [DEFAULT_ADMIN]; }
+  // Sem usuário embutido: o admin inicial é criado pelo amart_seguranca.sql
+  try{ const d=localStorage.getItem('sp_users'); return d?JSON.parse(d):[]; }catch(e){ return []; }
 }
 function loadSession(){
   try{ const d=localStorage.getItem('sp_session'); return d?JSON.parse(d):null; }catch(e){ return null; }
@@ -1814,8 +1815,10 @@ let users   = loadUsers();
 let session = loadSession();
 
 function saveUsers(){
+  // Só cache local. No banco, usuários são gravados apenas pelas funções sp_admin_*
+  // (a tabela users não aceita insert/update direto).
   localStorage.setItem('sp_users', JSON.stringify(users));
-  if(SUPA_URL && SUPA_KEY){
+  if(false){
     users.forEach(u => {
       const {mustChange, pass, passHash, ...uc} = u; // campos só locais
       if(typeof uc.perms==='object') uc.perms=JSON.stringify(uc.perms);
@@ -1839,47 +1842,37 @@ async function doLogin(){
   const btnEl = document.getElementById('btn-login');
   try {
 
-  // Cache local: usado só como reserva quando não há conexão
-  users = loadUsers();
-  let candidate = users.find(x => x.user.toLowerCase()===u);
-
-  // AUTENTICAÇÃO: o servidor é a fonte da verdade.
-  // Antes o login validava contra o cache local e só consultava o servidor se o usuário
-  // fosse desconhecido no aparelho. Efeito: senha trocada em outro dispositivo não valia
-  // aqui, e a senha ANTIGA continuava aceita. Agora consultamos sempre o registro atual
-  // (1 linha, rápido) e só caímos no cache local se estiver offline.
-  if(SUPA_URL && SUPA_KEY){
-    if(btnEl){ btnEl.disabled=true; btnEl.textContent='Verificando...'; }
-    try{
-      const remoto = await supa(`users?select=*&user=eq.${encodeURIComponent(u)}`);
-      if(Array.isArray(remoto) && remoto.length){
-        const cands = remoto.map(normalizeUser);
-        // Se houver logins duplicados, aceita o registro cuja senha confere
-        let match=null;
-        for(const c of cands){ if(await verifyPass(p, c)){ match=c; break; } }
-        candidate = match || cands[0];
-        // Atualiza o cache local deste usuário
-        const idx = users.findIndex(x=>x.id===candidate.id);
-        if(idx>=0) users[idx]=candidate; else users.push(candidate);
-        try{ localStorage.setItem('sp_users', JSON.stringify(users)); }catch(e){}
-      }
-    } catch(e){
-      // Sem conexão — segue com o cache local
-    } finally {
-      if(btnEl){ btnEl.disabled=false; btnEl.textContent='ENTRAR'; }
+  // AUTENTICAÇÃO pelo Supabase Auth: a senha é conferida no servidor (nunca no aparelho)
+  // e o banco só responde a quem tem token. Sem conexão não há login novo — quem já
+  // estava logado continua, porque a sessão fica guardada.
+  let found = null;
+  if(!u || !p){ errEl.textContent='Informe usuário e senha.'; errEl.classList.add('show'); return; }
+  if(btnEl){ btnEl.disabled=true; btnEl.textContent='Verificando...'; }
+  try{
+    await _authLogin(u, p);
+    const meu = await supa(`users?select=*&auth_id=eq.${encodeURIComponent(_auth.uid)}`);
+    if(Array.isArray(meu) && meu.length){
+      found = normalizeUser(meu[0]);
+      found.mustChange = !!meu[0].must_change;
+    } else {
+      _authLimpar();
+      errEl.textContent='Login sem cadastro no sistema. Fale com o administrador.';
+      errEl.classList.add('show');
+      return;
     }
-  }
-
-  if(!candidate){ candidate = null; }
-  const passOk = candidate ? await verifyPass(p, candidate) : false;
-  let found = passOk ? candidate : null;
-
-  // Migrar senha legada para hash na próxima vez
-  if(found && !found.passHash){
-    found.passHash = await hashPass(p);
-    delete found.pass;
-    saveUsers();
-    try{ await supaUpsert('users',{id:found.id,passhash:found.passHash},'id'); }catch(e){}
+  } catch(e){
+    _authLimpar();
+    const semRede = (e.name==='TypeError' || /Failed to fetch|NetworkError|conectar/i.test(e.message||''));
+    errEl.textContent = semRede ? 'Sem conexão com o servidor. Verifique a internet e tente de novo.'
+                                : 'Usuário ou senha inválidos';
+    errEl.classList.add('show');
+    if(!semRede){
+      document.getElementById('login-user').classList.add('err');
+      document.getElementById('login-pass').classList.add('err');
+    }
+    return;
+  } finally {
+    if(btnEl){ btnEl.disabled=false; btnEl.textContent='ENTRAR'; }
   }
 
   if(!found){
@@ -1901,7 +1894,7 @@ async function doLogin(){
   preencherDataPeriodoLote('e');
   refreshHome();
   // Forçar troca de senha padrão
-  if(found.mustChange || (found.id==='admin' && !found.passHash)){
+  if(found.mustChange){
     setTimeout(()=>{
       showToast('⚠ Por segurança, troque a senha padrão agora.','#f59e0b','#000');
       document.getElementById('modal-change-pass').classList.add('open');
@@ -1947,9 +1940,18 @@ async function doLogin(){
   }
 }
 
-function doLogout(){
+function doLogout(sessaoJaCaiu){
+  // Encerra a sessão também no servidor (o refresh_token deixa de valer)
+  if(!sessaoJaCaiu && _auth?.access_token){
+    fetch(SUPA_URL+'/auth/v1/logout', { method:'POST',
+      headers:{ 'apikey':SUPA_KEY, 'Authorization':'Bearer '+_auth.access_token } }).catch(()=>{});
+  }
+  _authLimpar();
   session = null;
   localStorage.removeItem('sp_session');
+  // A lista de usuários não fica no aparelho depois de sair
+  try{ localStorage.removeItem('sp_users'); }catch(e){}
+  users = [];
   document.getElementById('login-screen').classList.remove('hidden');
   document.getElementById('login-pass').value='';
   document.getElementById('login-user').value='';
@@ -2121,6 +2123,10 @@ function togglePermFields(){
   document.getElementById('perm-block').style.display = role==='operator' ? '' : 'none';
 }
 
+async function supaRpc(fn, args){
+  return supa('rpc/'+fn, { method:'POST', body: JSON.stringify(args||{}) });
+}
+
 async function saveUser(){
   const nome=document.getElementById('uf-nome').value.trim();
   const user=document.getElementById('uf-user').value.trim().toLowerCase();
@@ -2128,23 +2134,9 @@ async function saveUser(){
   const pass=document.getElementById('uf-pass').value;
   const role=document.getElementById('uf-role').value;
   if(!nome||!user){ showToast('Preencha nome e usuário.','#e05c1a','#fff'); return; }
+  if(!/^[a-z0-9._-]{2,}$/.test(user)){ showToast('Login: só letras, números, ponto, hífen ou _ (sem espaço nem acento).','#e05c1a','#fff'); return; }
   if(!editUserId&&!pass){ showToast('Informe uma senha.','#e05c1a','#fff'); return; }
-  if(pass&&pass.length<4){ showToast('Senha mínima de 4 caracteres.','#e05c1a','#fff'); return; }
-  // Duplicidade: compara normalizado e ignora o próprio registro em edição.
-  const _norm=s=>String(s||'').trim().toLowerCase();
-  let dup=users.find(u=>_norm(u.user)===_norm(user)&&u.id!==editUserId);
-  // Em criação, confere também no servidor: dois dispositivos com a lista local
-  // desatualizada podiam criar o mesmo login duas vezes (foi o que gerou duplicatas).
-  if(!dup && !editUserId && SUPA_URL && SUPA_KEY){
-    try{
-      const remotos=await supa(`users?select=id,user&user=eq.${encodeURIComponent(user)}`);
-      if(Array.isArray(remotos)&&remotos.length) dup=remotos[0];
-    }catch(e){ console.warn('[users] checagem remota de duplicidade falhou:', e.message); }
-  }
-  if(dup){
-    showToast(`Já existe um usuário com o login "${user}"${dup.nome?' ('+dup.nome+')':''}.`,'#e05c1a','#fff');
-    return;
-  }
+  if(pass&&pass.length<6){ showToast('Senha mínima de 6 caracteres.','#e05c1a','#fff'); return; }
   const perms = role==='admin'
     ? {descarga:true,expedicao:true,database:true,relatorios:true,usuarios:true}
     : role==='viewer'
@@ -2165,29 +2157,25 @@ async function saveUser(){
   // Armazéns permitidos (vazio = todos)
   const armSel = document.getElementById('uf-armazens');
   const armazens = armSel ? [...armSel.selectedOptions].map(o=>o.value).filter(Boolean) : [];
-  let userData;
-  if(editUserId){
-    const idx=users.findIndex(u=>u.id===editUserId);
-    if(idx>=0){
-      users[idx]={...users[idx],nome,user,email,role,perms,armazens,mustChange:false};
-      if(pass){
-        users[idx].passHash = await hashPass(pass);
-        delete users[idx].pass;
-      }
-      userData=users[idx];
-    }
-    editUserId=null;
-    document.getElementById('user-form-title').textContent='➕ NOVO USUÁRIO';
-    showToast('✓ Usuário atualizado!','#22c55e','#000');
-  } else {
-    const passHash = await hashPass(pass);
-    userData={id:'u'+Date.now(),nome,user,email,passHash,role,perms,armazens,mustChange:false};
-    users.push(userData);
-    showToast('✓ Usuário '+nome+' criado!','#22c55e','#000');
+  // Grava no servidor pela função sp_admin_salvar_usuario: ela confere se quem pede é
+  // admin, se o login já existe e cria/atualiza a conta de login no Supabase Auth.
+  try{
+    await supaRpc('sp_admin_salvar_usuario', {
+      p_id: editUserId || null, p_nome: nome, p_user: user, p_email: email, p_role: role,
+      p_perms: perms, p_armazens: armazens, p_senha: pass || null
+    });
+  }catch(err){
+    showToast('⚠ '+err.message,'#e05c1a','#fff');
+    return;
   }
-  localStorage.setItem('sp_users',JSON.stringify(users));
+  showToast(editUserId ? '✓ Usuário atualizado!' : '✓ Usuário '+nome+' criado!','#22c55e','#000');
+  editUserId=null;
+  document.getElementById('user-form-title').textContent='➕ NOVO USUÁRIO';
+  try{
+    users=(await supaAll('users?select=*&order=id.asc')).map(normalizeUser);
+    localStorage.setItem('sp_users',JSON.stringify(users));
+  }catch(e){ console.warn('[users] recarga falhou:', e.message); }
   clearUserForm(); renderUsersList(); refreshHome();
-  try { await apiPost({action:'saveUser',data:userData}); } catch(err){ showToast('⚠ Sync falhou: '+err.message,'#f59e0b','#000'); }
 }
 
 function editUser(id){
@@ -2227,11 +2215,13 @@ function editUser(id){
 
 async function deleteUser(id){
   if(id==='admin'){ showToast('O administrador principal não pode ser excluído.','#e05c1a','#fff'); return; }
+  // Exclui no servidor primeiro (apaga também a conta de login e derruba as sessões dele)
+  try { await supaRpc('sp_admin_excluir_usuario', {p_id:id}); }
+  catch(err){ showToast('⚠ '+err.message,'#e05c1a','#fff'); return; }
   users=users.filter(u=>u.id!==id);
   localStorage.setItem('sp_users',JSON.stringify(users));
   renderUsersList(); refreshHome();
   showToast('Usuário excluído.','#e05c1a','#fff');
-  try { await api({action:'deleteUser',id}); } catch(err){}
 }
 
 function buildArmSelect(){
@@ -2444,18 +2434,92 @@ function setSupabase(url, key){
   localStorage.setItem('sp_supa_key', SUPA_KEY);
 }
 
-function supaHeaders(extra){
-  return { 'apikey': SUPA_KEY, 'Authorization': 'Bearer '+SUPA_KEY, 'Content-Type': 'application/json', ...extra };
+// ── LOGIN PELO SUPABASE AUTH ─────────────────────────────────────
+// A chave pública (SUPA_KEY) sozinha não abre mais o banco: toda chamada leva o
+// token de quem está logado, e as regras do banco (RLS) decidem o que cada perfil
+// lê e grava. O token dura 1 h e é renovado sozinho com o refresh_token, que fica
+// guardado no aparelho (a sessão continua aberta até clicar em Sair).
+const SP_EMAIL_DOM = '@steelport.local';   // login "joao" = e-mail interno joao@steelport.local
+let _auth = null;
+try{ _auth = JSON.parse(localStorage.getItem('sp_auth')||'null'); }catch(e){ _auth=null; }
+let _authRefreshing = null;
+
+function _authSalvar(j){
+  _auth = { access_token:j.access_token, refresh_token:j.refresh_token,
+            expires_at: j.expires_at || (Math.floor(Date.now()/1000) + (j.expires_in||3600)),
+            uid: j.user?.id || _auth?.uid };
+  try{ localStorage.setItem('sp_auth', JSON.stringify(_auth)); }catch(e){}
+}
+function _authLimpar(){
+  _auth = null;
+  try{ localStorage.removeItem('sp_auth'); }catch(e){}
+}
+async function _authReq(path, body, token){
+  const res = await fetch(SUPA_URL+'/auth/v1/'+path, {
+    method:'POST',
+    headers:{ 'apikey':SUPA_KEY, 'Content-Type':'application/json', ...(token?{'Authorization':'Bearer '+token}:{}) },
+    body: JSON.stringify(body||{})
+  });
+  const txt = await res.text();
+  let j={}; try{ j = txt ? JSON.parse(txt) : {}; }catch(e){}
+  if(!res.ok){ const err = new Error(j.error_description || j.msg || j.message || ('HTTP '+res.status)); err.status=res.status; throw err; }
+  return j;
+}
+async function _authLogin(login, senha){
+  const j = await _authReq('token?grant_type=password',
+    { email: String(login).trim().toLowerCase() + SP_EMAIL_DOM, password: senha });
+  _authSalvar(j);
+  return _auth;
+}
+// Renova o token. Uma renovação por vez: várias chamadas em paralelo esperam a mesma.
+async function _authRefresh(){
+  if(!_auth?.refresh_token) throw new Error('Sessão expirada — entre novamente.');
+  if(_authRefreshing) return _authRefreshing;
+  _authRefreshing = (async()=>{
+    try{
+      const j = await _authReq('token?grant_type=refresh_token', { refresh_token: _auth.refresh_token });
+      _authSalvar(j);
+    }catch(e){
+      // 400/401 = refresh_token recusado (usuário excluído, senha trocada pelo admin…)
+      if(e.status===400 || e.status===401){ _authLimpar(); _authSessaoCaiu(); }
+      throw e;
+    }finally{ _authRefreshing = null; }
+  })();
+  return _authRefreshing;
+}
+// Garante token válido por pelo menos mais 60 s antes de cada chamada
+async function _authEnsure(){
+  if(!_auth) return;
+  if((_auth.expires_at||0) - 60 <= Math.floor(Date.now()/1000)){
+    try{ await _authRefresh(); }catch(e){ if(!_auth) throw new Error('Sessão expirada — entre novamente.'); }
+  }
+}
+function _authSessaoCaiu(){
+  if(!session) return;
+  try{ showToast('Sua sessão terminou. Entre novamente.','#e05c1a','#fff'); }catch(e){}
+  try{ doLogout(true); }catch(e){}
 }
 
-async function supa(path, opts={}){
+function supaHeaders(extra){
+  const tok = _auth?.access_token || SUPA_KEY;
+  return { 'apikey': SUPA_KEY, 'Authorization': 'Bearer '+tok, 'Content-Type': 'application/json', ...extra };
+}
+
+async function supa(path, opts={}, _tentou){
   if(!SUPA_URL||!SUPA_KEY) throw new Error('Supabase não configurado');
+  if(!_auth) throw new Error('Faça login para acessar os dados.');
+  await _authEnsure();
   try {
     const res = await fetch(SUPA_URL+'/rest/v1/'+path, {
       method:  opts.method  || 'GET',
       headers: supaHeaders(opts.headers||{}),
       body:    opts.body    || undefined
     });
+    // Token vencido no meio do caminho (aparelho dormindo, relógio errado): renova e tenta de novo uma vez
+    if(res.status===401 && !_tentou && _auth){
+      try{ await _authRefresh(); }catch(e){}
+      if(_auth) return supa(path, opts, true);
+    }
     if(res.status===204) return [];
     const text = await res.text();
     if(!text) return [];
@@ -2486,8 +2550,9 @@ const SUPA_PAGE = 1000;
 // Quantas linhas a consulta tem, lido do cabeçalho Content-Range.
 // Serve para saber de antemão quantas páginas existem e buscá-las TODAS de uma vez.
 async function _supaTotal(path){
-  if(!SUPA_URL||!SUPA_KEY) return null;
+  if(!SUPA_URL||!SUPA_KEY||!_auth) return null;
   try{
+    await _authEnsure();
     const sep = path.includes('?') ? '&' : '?';
     const res = await fetch(SUPA_URL+'/rest/v1/'+path+sep+'limit=1',
       { headers: supaHeaders({'Prefer':'count=exact','Range-Unit':'items','Range':'0-0'}) });
@@ -2690,7 +2755,6 @@ async function loadAllData(forcarBobinas){
     _tkFlushPending(false);
     navios     = (navs ||[]).map(r=>r.nome).filter(Boolean);
     users      = (usrs ||[]).map(normalizeUser);
-    if(!users.length) users=[DEFAULT_ADMIN];
     // Mantém a sessão atual sincronizada com os armazéns mais recentes do usuário
     if(session){
       const freshSelf=users.find(u=>u.id===session.id);
@@ -2945,7 +3009,11 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   const _clk=document.getElementById('clock');
   if(_clk) setInterval(()=>{ _clk.textContent=new Date().toLocaleString('pt-BR'); }, 1000);
 
-  // Restore existing session
+  // Restore existing session — só vale com o login do Supabase guardado junto
+  if(session && !_auth){
+    session = null;
+    try{ localStorage.removeItem('sp_session'); }catch(e){}
+  }
   if(session){
     document.getElementById('login-screen').classList.add('hidden');
     applySessionUI();
@@ -8082,6 +8150,15 @@ async function doForgotPass(){
   const input = document.getElementById('forgot-input').value.trim().toLowerCase();
   const resultEl = document.getElementById('forgot-result');
   if(!input){ showToast('Digite seu usuário ou e-mail.','#e05c1a','#fff'); return; }
+  // Com o login no Supabase Auth, senha nova só pelo administrador (Usuários → editar →
+  // nova senha). Gerar senha aqui, sem estar logado, deixaria qualquer um trocar a senha
+  // de qualquer usuário.
+  resultEl.style.display='block';
+  resultEl.style.background='rgba(240,165,0,.1)';
+  resultEl.style.border='1px solid rgba(240,165,0,.3)';
+  resultEl.innerHTML='<span style="color:var(--accent);font-weight:700;">Peça ao administrador do sistema para definir uma nova senha.</span><br>'
+    +'<span style="font-size:12px;color:var(--muted);">Ele faz isso em Usuários → editar → nova senha. No próximo login o sistema pede para você trocar.</span>';
+  return;
 
   // Find user by username or email
   const found = users.find(u =>
@@ -13441,23 +13518,13 @@ async function confirmarAlterarSenha(){
   };
 
   if(!atual||!nova||!confirma){ showMsg('Preencha todos os campos.',false); return; }
-  if(nova.length<4){ showMsg('A nova senha deve ter pelo menos 4 caracteres.',false); return; }
+  if(nova.length<6){ showMsg('A nova senha deve ter pelo menos 6 caracteres.',false); return; }
   if(nova!==confirma){ showMsg('As senhas não coincidem.',false); return; }
 
-  // Verify current password
-  const u=users.find(u=>u.user===session.user);
-  if(!u){ showMsg('Usuário não encontrado.',false); return; }
-  const passOkCP = await verifyPass(atual, u);
-  if(!passOkCP){ showMsg('Senha atual incorreta.',false); return; }
-
-  // Update — salva hash, remove campos legados
-  u.passHash = await hashPass(nova);
-  delete u.pass;
-  u.mustChange = false;
-  if(session.id===u.id){ session.mustChange=false; localStorage.setItem('sp_session',JSON.stringify(session)); }
+  // O servidor confere a senha atual e grava a nova no Supabase Auth
   try{
-    await supaUpsert('users', {id:u.id, passhash:u.passHash}, 'id');
-    saveUsers();
+    await supaRpc('sp_trocar_minha_senha', {p_atual: atual, p_nova: nova});
+    session.mustChange=false; localStorage.setItem('sp_session',JSON.stringify(session));
     showMsg('✓ Senha alterada com sucesso!',true);
     setTimeout(()=>closeModal('modal-change-pass'), 1500);
   }catch(e){
@@ -14393,9 +14460,7 @@ async function _portoBuscar(dtIni, dtFim, onProgress){
     try{
       const res=await fetch(cfg.edge,{
         method:'POST',
-        headers:{'Content-Type':'application/json',
-                 'Authorization':'Bearer '+SUPA_KEY,
-                 'apikey':SUPA_KEY},
+        headers:(await _authEnsure(), supaHeaders()),
         body:JSON.stringify({dt_inicial:dtIni, dt_final:dtFim})
       });
       js=await res.json();
@@ -18603,7 +18668,9 @@ function downloadCgTemplate(){
   const ex1=['MAEU2024001234','MSC GÜLSÜN','Usiminas','BFM','BFM 10MM VERGALHÃO 12M',500,'TN','ARM-01',250000];
   const ex2=['MAEU2024001234','MSC GÜLSÜN','Usiminas','Vergalhão','VERGALHÃO CA-50 16MM',300,'TN','ARM-01',150000];
   const ex3=['BRGE2024009999','EVER GIVEN','Belgo','Cantoneira','CANTONEIRA 50x50x5MM',120,'TN','ARM-02',60000];
-  const ws=XLSX.utils.aoa_to_sheet([header,ex1,ex2,ex3]);
+  // Só o cabeçalho: as linhas de exemplo ficam na aba Instruções. Antes elas vinham
+  // na 1ª aba e eram importadas junto se a pessoa preenchesse por baixo delas.
+  const ws=XLSX.utils.aoa_to_sheet([header]);
   ws['!cols']=[{wch:20},{wch:18},{wch:16},{wch:14},{wch:28},{wch:12},{wch:10},{wch:12},{wch:12}];
   XLSX.utils.book_append_sheet(wb,ws,'Banco Carga Geral');
   const instr=XLSX.utils.aoa_to_sheet([
@@ -18623,8 +18690,12 @@ function downloadCgTemplate(){
     ['- BL + DESCRIÇÃO/CHAVE identificam o item de forma única'],
     ['- Se já existir um item com mesmo BL + Descrição, os dados serão atualizados'],
     ['- Use ponto ou vírgula como separador decimal para QTD e PESO'],
+    ['- Preencha a aba "Banco Carga Geral" a partir da linha 2 (a linha 1 é o cabeçalho)'],
+    [''],
+    ['EXEMPLOS DE PREENCHIMENTO (não importar):'],
+    header, ex1, ex2, ex3,
   ]);
-  instr['!cols']=[{wch:24},{wch:16},{wch:24}];
+  instr['!cols']=[{wch:24},{wch:16},{wch:24},{wch:14},{wch:28},{wch:12},{wch:10},{wch:12},{wch:12}];
   XLSX.utils.book_append_sheet(wb,instr,'Instruções');
   XLSX.writeFile(wb,'4SIDES_CargaGeral_Modelo.xlsx');
   showToast('✓ Modelo Excel baixado!','#22c55e','#000');
@@ -20556,6 +20627,7 @@ o</label>
       <div style="font-size:12px;color:var(--muted);font-family:'JetBrains Mono',monospace;">📌 Colunas: <span style="color:var(--accent)">BL · NAVIO · CLIENTE · PRODUTO · DESCRIÇÃO/CHAVE · QTD_TOTAL · UNIDADE · ARMAZÉM · PESO_KG</span></div>
       <div style="display:flex;justify-content:space-between;gap:1rem;">
         <button class="btn btn-secondary btn-sm" onclick="closeModal('modal-cg-import');resetCgImport();">CANCELAR</button>
+        <button class="btn btn-secondary btn-sm" onclick="downloadCgTemplate()" title="Planilha com as colunas certas para preencher e importar">↓ BAIXAR MODELO</button>
         <button class="btn btn-primary" id="btn-confirm-cg-import" style="display:none;" onclick="confirmCgImport()">✓ IMPORTAR ITENS</button>
       </div>
     </div>
